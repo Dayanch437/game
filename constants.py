@@ -18,9 +18,9 @@ BROWN = (139, 69, 19)
 SKY_BLUE = (135, 206, 235)
 
 # Physics
-GRAVITY = 0.7  # Gentler gravity for easier control
-JUMP_STRENGTH = -16  # Higher jump
-PLAYER_SPEED = 6  # Faster movement
+GRAVITY = 0.6  # Even gentler gravity for more air control
+JUMP_STRENGTH = -18  # Much higher jump for excitement!
+PLAYER_SPEED = 8  # Faster movement for better control
 ENEMY_SPEED = 1.5  # Slower enemies
 
 # Player settings

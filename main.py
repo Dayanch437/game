@@ -9,6 +9,8 @@ from player import Player
 from platform import Platform, create_level_1
 from enemy import Enemy, create_enemies_level_1
 from coin import Coin, create_coins_level_1
+from particle import ParticleSystem
+from powerup import PowerUp, PowerUpEffect, create_powerups_level_1
 
 
 class Game:
@@ -33,9 +35,20 @@ class Game:
         self.platforms = create_level_1()
         self.enemies = create_enemies_level_1()
         self.coins = create_coins_level_1()
+        self.powerups = create_powerups_level_1()
+        
+        # Particle system
+        self.particles = ParticleSystem()
+        
+        # Power-up effects
+        self.active_powerups = []
         
         # Game variables
         self.total_coins = len(self.coins)
+        
+        # Track player state for particle effects
+        self.player_was_on_ground = False
+        self.player_was_dashing = False
         
     def run(self):
         """Main game loop"""
@@ -70,8 +83,32 @@ class Game:
         
     def update(self):
         """Update game logic"""
-        # Update player
-        self.player.update(self.platforms)
+        # Emit dash particles
+        if self.player.is_dashing and not self.player_was_dashing:
+            self.particles.emit_dash(self.player.rect.centerx, self.player.rect.centery, self.player.facing_right)
+        self.player_was_dashing = self.player.is_dashing
+        
+        # Emit jump particles
+        if not self.player.on_ground and self.player_was_on_ground:
+            self.particles.emit_jump(self.player.rect.centerx, self.player.rect.bottom)
+        
+        # Emit landing particles
+        if self.player.on_ground and not self.player_was_on_ground:
+            self.particles.emit_landing(self.player.rect.centerx, self.player.rect.bottom)
+        
+        self.player_was_on_ground = self.player.on_ground
+        
+        # Update player with power-up effects
+        speed_boost = 1.0
+        jump_boost = 1.0
+        
+        for effect in self.active_powerups:
+            if effect.type == PowerUp.SPEED_BOOST:
+                speed_boost = 1.5
+            elif effect.type == PowerUp.MEGA_JUMP:
+                jump_boost = 1.4
+        
+        self.player.update(self.platforms, speed_boost, jump_boost)
         
         # Update enemies
         for enemy in self.enemies:
@@ -81,14 +118,56 @@ class Game:
         for coin in self.coins:
             coin.update()
             
-        # Check coin collection
+        # Update power-ups
+        for powerup in self.powerups:
+            powerup.update()
+        
+        # Update particles
+        self.particles.update()
+        
+        # Update active power-up timers
+        for effect in self.active_powerups:
+            effect.update()
+        self.active_powerups = [e for e in self.active_powerups if not e.is_expired()]
+            
+        # Check coin collection with combo system
         for coin in self.coins:
             if not coin.collected and self.player.rect.colliderect(coin.rect):
                 coin.collected = True
-                self.player.score += 10
+                self.player.add_combo()
+                multiplier = self.player.get_combo_multiplier()
                 
-        # Check enemy collision (only if not invincible)
-        if not self.player.invincible:
+                # Apply score multiplier power-up
+                if self.has_powerup(PowerUp.SCORE_MULTIPLIER):
+                    multiplier *= 2
+                    
+                points = int(10 * multiplier)
+                self.player.score += points
+                self.particles.emit_coin_collect(coin.rect.centerx, coin.rect.centery)
+                if self.player.combo > 2:
+                    self.particles.emit_combo(self.player.rect.centerx, self.player.rect.top)
+        
+        # Check power-up collection
+        for powerup in self.powerups:
+            if not powerup.collected and self.player.rect.colliderect(powerup.rect):
+                powerup.collected = True
+                self.active_powerups.append(PowerUpEffect(powerup.powerup_type))
+                self.player.score += 25
+                self.particles.emit_coin_collect(powerup.rect.centerx, powerup.rect.centery)
+                
+        # Check enemy collision
+        if self.player.immortal:
+            # In immortal mode, colliding with enemies gives points and combo!
+            for enemy in self.enemies:
+                if self.player.rect.colliderect(enemy.rect) and not self.player.invincible:
+                    self.player.invincible = True
+                    self.player.invincible_timer = 30  # Short invincibility to prevent multiple hits
+                    self.player.add_combo()
+                    self.player.score += int(15 * self.player.get_combo_multiplier())
+                    self.particles.emit_combo(self.player.rect.centerx, self.player.rect.top)
+                    break
+        elif not self.player.invincible:
+            # Only take damage if not immortal and not invincible
             for enemy in self.enemies:
                 if self.player.rect.colliderect(enemy.rect):
                     self.player.lives -= 1
@@ -104,22 +183,33 @@ class Game:
                         self.player.vel_y = 0
                     break  # Only hit once
                     
-        # Check if player falls off screen
+        # Check if player falls off screen (immortal mode: just reset position)
         if self.player.rect.top > SCREEN_HEIGHT:
-            self.player.lives -= 1
-            self.player.invincible = True
-            self.player.invincible_timer = INVINCIBILITY_TIME
-            if self.player.lives <= 0:
-                self.state = GAME_OVER
-            else:
+            if self.player.immortal:
+                # Just reset position in immortal mode
                 self.player.rect.x = 50
                 self.player.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT - PLAYER_HEIGHT - 10
                 self.player.vel_x = 0
                 self.player.vel_y = 0
+            else:
+                self.player.lives -= 1
+                self.player.invincible = True
+                self.player.invincible_timer = INVINCIBILITY_TIME
+                if self.player.lives <= 0:
+                    self.state = GAME_OVER
+                else:
+                    self.player.rect.x = 50
+                    self.player.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT - PLAYER_HEIGHT - 10
+                    self.player.vel_x = 0
+                    self.player.vel_y = 0
                 
         # Check win condition (collect all coins)
         if all(coin.collected for coin in self.coins):
             self.state = WIN
+                
+    def has_powerup(self, powerup_type):
+        """Check if player has a specific power-up active"""
+        return any(e.type == powerup_type for e in self.active_powerups)
             
     def draw(self):
         """Draw everything"""
@@ -150,26 +240,30 @@ class Game:
         self.screen.blit(title, title_rect)
         
         instructions = [
-            "HOW TO PLAY:",
+            "HOW TO PLAY - ENHANCED EDITION:",
             "",
             "🏃 Move: Arrow Keys or A/D",
-            "⬆️  Jump: SPACE, UP, or W",
-            "💰 Collect all coins to WIN!",
-            "👾 Avoid the green enemies",
-            "❤️  You have 5 lives",
+            "⬆️  Jump: SPACE, UP, or W (Double Jump!)",
+            "⚡ Dash: SHIFT (Super Speed!)",
+            "💰 Collect coins for combos!",
+            "⭐ Collect power-ups!",
+            "👾 Touch enemies for BONUS points!",
             "",
-            "TIPS:",
-            "• You get 2 seconds invincibility after being hit",
-            "• Jump higher and move faster!",
-            "• Explore all platforms for coins",
+            "✨ NEW FEATURES:",
+            "• 🛡️  IMMORTAL MODE - Never die!",
+            "• 🔥 Double jump in mid-air",
+            "• ⚡ Dash ability with cooldown",
+            "• 🎯 Combo system for bonus points",
+            "• ⭐ Power-ups: Speed, Jump, Score x2",
+            "• 💫 Particle effects!",
             "",
             "Press ENTER to Start",
             "Press ESC to Quit"
         ]
         
-        y = 180
+        y = 150
         for instruction in instructions:
-            if instruction.startswith("HOW") or instruction.startswith("TIPS"):
+            if instruction.startswith("HOW") or instruction.startswith("✨"):
                 text = self.small_font.render(instruction, True, BLUE)
             elif instruction == "":
                 y += 10
@@ -178,7 +272,7 @@ class Game:
                 text = self.small_font.render(instruction, True, BLACK)
             text_rect = text.get_rect(center=(SCREEN_WIDTH // 2, y))
             self.screen.blit(text, text_rect)
-            y += 30
+            y += 25
             
     def draw_game(self):
         """Draw game elements"""
@@ -189,10 +283,17 @@ class Game:
         # Draw coins
         for coin in self.coins:
             coin.draw(self.screen)
+        
+        # Draw power-ups
+        for powerup in self.powerups:
+            powerup.draw(self.screen)
             
         # Draw enemies
         for enemy in self.enemies:
             enemy.draw(self.screen)
+            
+        # Draw particles (behind player)
+        self.particles.draw(self.screen)
             
         # Draw player
         self.player.draw(self.screen)
@@ -201,9 +302,9 @@ class Game:
         self.draw_hud()
         
     def draw_hud(self):
-        """Draw heads-up display (score, lives)"""
-        # HUD background panel
-        hud_bg = pygame.Surface((200, 110))
+        """Draw heads-up display (score, lives, combo, dash, etc.)"""
+        # Main HUD background panel (larger to fit new info)
+        hud_bg = pygame.Surface((220, 190))
         hud_bg.set_alpha(180)
         hud_bg.fill((50, 50, 50))
         self.screen.blit(hud_bg, (5, 5))
@@ -212,26 +313,49 @@ class Game:
         score_text = self.small_font.render(f"⭐ Score: {self.player.score}", True, YELLOW)
         self.screen.blit(score_text, (15, 15))
         
-        # Lives with heart icons
-        lives_text = self.small_font.render(f"❤️  Lives:", True, RED)
-        self.screen.blit(lives_text, (15, 45))
-        # Draw heart icons for lives
-        for i in range(self.player.lives):
-            heart_x = 100 + i * 20
-            if heart_x < 195:  # Don't overflow panel
-                heart = self.small_font.render("❤️", True, RED)
-                self.screen.blit(heart, (heart_x, 45))
+        # Immortal mode indicator
+        if self.player.immortal:
+            immortal_text = self.small_font.render("🛡️  IMMORTAL MODE!", True, (255, 215, 0))
+            self.screen.blit(immortal_text, (15, 40))
+        else:
+            # Lives with heart icons (only show if not immortal)
+            lives_text = self.small_font.render(f"❤️  Lives:", True, RED)
+            self.screen.blit(lives_text, (15, 40))
+            # Draw heart icons for lives
+            for i in range(min(self.player.lives, 8)):  # Max 8 hearts displayed
+                heart_x = 100 + i * 20
+                if heart_x < 215:  # Don't overflow panel
+                    heart = self.small_font.render("❤️", True, RED)
+                    self.screen.blit(heart, (heart_x, 40))
+        
+        # Combo counter (if active)
+        if self.player.combo > 0:
+            combo_color = (255, 100, 255) if self.player.combo >= 5 else (255, 200, 100)
+            combo_text = self.small_font.render(f"🔥 COMBO x{self.player.combo}! ", True, combo_color)
+            self.screen.blit(combo_text, (15, 65))
+            multiplier_text = self.small_font.render(f"   ({self.player.get_combo_multiplier()}x points)", True, combo_color)
+            self.screen.blit(multiplier_text, (15, 65))
+        
+        # Dash cooldown indicator
+        dash_y = 90 if self.player.combo > 0 else 65
+        if self.player.dash_cooldown_timer > 0:
+            cooldown_pct = (self.player.dash_cooldown_timer / self.player.dash_cooldown) * 100
+            dash_text = self.small_font.render(f"⚡ Dash: {int(cooldown_pct)}%", True, (150, 150, 150))
+        else:
+            dash_text = self.small_font.render("⚡ Dash: READY!", True, (100, 255, 100))
+        self.screen.blit(dash_text, (15, dash_y))
         
         # Coins collected with progress bar
+        coins_y = dash_y + 25
         coins_collected = sum(1 for coin in self.coins if coin.collected)
         coins_text = self.small_font.render(f"💰 Coins: {coins_collected}/{self.total_coins}", True, YELLOW)
-        self.screen.blit(coins_text, (15, 75))
+        self.screen.blit(coins_text, (15, coins_y))
         
         # Progress bar for coins
-        bar_width = 170
+        bar_width = 190
         bar_height = 10
         bar_x = 15
-        bar_y = 95
+        bar_y = coins_y + 20
         # Background bar
         pygame.draw.rect(self.screen, (100, 100, 100), (bar_x, bar_y, bar_width, bar_height))
         # Progress bar
@@ -239,6 +363,18 @@ class Game:
         pygame.draw.rect(self.screen, YELLOW, (bar_x, bar_y, progress, bar_height))
         # Border
         pygame.draw.rect(self.screen, WHITE, (bar_x, bar_y, bar_width, bar_height), 2)
+        
+        # Active power-ups display
+        powerup_y = bar_y + 15
+        if self.active_powerups:
+            for i, effect in enumerate(self.active_powerups):
+                if effect.type == PowerUp.SPEED_BOOST:
+                    text = self.small_font.render(f"⚡ Speed: {effect.get_time_remaining():.1f}s", True, BLUE)
+                elif effect.type == PowerUp.MEGA_JUMP:
+                    text = self.small_font.render(f"🚀 Jump: {effect.get_time_remaining():.1f}s", True, (255, 100, 255))
+                else:  # SCORE_MULTIPLIER
+                    text = self.small_font.render(f"⭐ 2x Score: {effect.get_time_remaining():.1f}s", True, (255, 215, 0))
+                self.screen.blit(text, (15, powerup_y + i * 20))
         
     def draw_game_over(self):
         """Draw game over screen"""
